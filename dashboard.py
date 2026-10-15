@@ -1,6 +1,8 @@
+import argparse
 import ctypes
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -68,9 +70,6 @@ def cpu_times():
     return to_int(idle_time), to_int(kernel_time) + to_int(user_time)
 
 
-URL = "http://localhost:8085/data.json"
-
-
 def walk(node, path, out):
     path = path + [node.get("Text", "")]
     if node.get("Value"):
@@ -78,34 +77,69 @@ def walk(node, path, out):
     for child in node.get("Children", []):
         walk(child, path, out)
 
+RETRY_SECONDS = 10
+sensors_down_until = 0.0
 
-def sensors():
+
+def sensors(url):
+    global sensors_down_until
+    if time.monotonic() < sensors_down_until:
+        return []
     try:
-        with urllib.request.urlopen(URL, timeout=0.5) as r:
+        with urllib.request.urlopen(url, timeout=0.5) as r:
             tree = json.load(r)
-    except OSError:
+    except (OSError, ValueError):
+        sensors_down_until = time.monotonic() + RETRY_SECONDS
         return []
     out = []
     walk(tree, [], out)
     return out
 
+def find_value(data, ending):
+    for path, value in data:
+        if path.endswith(ending):
+            try:
+                return float(value.split()[0].replace(",", "."))
+            except (ValueError, IndexError):
+                continue
+    return None
+
+def fmt_temp(value):
+    return "  n/a" if value is None else f"{value:5.1f} °C"
 
 def find_value(data, ending):
     for path, value in data:
         if path.endswith(ending):
-            return float(value.split()[0].replace(",", "."))
+            try:
+                return float(value.split()[0].replace(",", "."))
+            except (ValueError, IndexError):
+                continue
     return None
 
 
+def fmt_temp(value):
+    return "  n/a" if value is None else f"{value:5.1f} °C"
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Terminal-dashboard til CPU, RAM, GPU og disk")
+    p.add_argument("-i", "--interval", type=float, default=1.0, help="sekunder mellem opdateringer")
+    p.add_argument("--url", default="http://localhost:8085/data.json", help="LibreHardwareMonitor data.json")
+    p.add_argument("--disk", default="C:\\", help="drev der vises i disk-panelet")
+    return p.parse_args()
+ 
 def main():
+    args = parse_args()
     os.system("")
-    sys.stdout.write("\x1b[?25l\x1b[2J")  # skjul markør, ryd skærm én gang
-    cpu_hist = [0.0] * 60
-    ram_hist = [0.0] * 60
+    sys.stdout.write("\x1b[?25l\x1b[2J")
+
+    HIST_MAX = 500
+    cpu_hist = [0.0] * HIST_MAX
+    ram_hist = [0.0] * HIST_MAX
     prev_idle, prev_total = cpu_times()
     try:
         while True:
-            time.sleep(1)
+            time.sleep(args.interval)
             idle, total = cpu_times()
             d_total = total - prev_total
             cpu = 100 * (1 - (idle - prev_idle) / d_total) if d_total else 0.0
@@ -116,27 +150,46 @@ def main():
             cpu_hist = cpu_hist[1:] + [cpu]
             ram_hist = ram_hist[1:] + [ram]
 
+            data = sensors(args.url)
+            cpu_temp = find_value(data, "Temperatures / CPU Package")
+
+            gpu_load = find_value(data, "Load / GPU Core")
+            gpu_temp = find_value(data, "Temperatures / GPU Core")
+
+            disk = shutil.disk_usage(args.disk)
+            disk_pct = disk.used / disk.total * 100
+
+            cols = shutil.get_terminal_size().columns
+            width = max(10, min(cols - 40, 100))
+            hist_len = max(10, min(cols - 8, HIST_MAX))
+
             gb = 1024 ** 3
             out = [
                 "\x1b[H\x1b[1m  TERMINAL-DASHBOARD\x1b[0m   (Ctrl+C for at stoppe)",
                 "",
-                f"  CPU {color(cpu)}{bar(cpu)}{RESET} {cpu:5.1f} %",
-                f"      {color(cpu)}{sparkline(cpu_hist)}{RESET}",
+                f"  CPU  {color(cpu)}{bar(cpu, width)}{RESET} {cpu:5.1f} %  {fmt_temp(cpu_temp)}",
+                f"       {color(cpu)}{sparkline(cpu_hist[-hist_len:])}{RESET}",
                 "",
-                f"  RAM {color(ram)}{bar(ram)}{RESET} {ram:5.1f} %  "
+                f"  RAM  {color(ram)}{bar(ram, width)}{RESET} {ram:5.1f} %  "
                 f"({used / gb:.1f} / {ram_total / gb:.1f} GB)",
-                f"      {color(ram)}{sparkline(ram_hist)}{RESET}",
+                f"       {color(ram)}{sparkline(ram_hist[-hist_len:])}{RESET}",
+                "",
             ]
-            sys.stdout.write("\n".join(line + "\x1b[K" for line in out))
+            if gpu_load is None:
+                out.append("  GPU  n/a (start LibreHardwareMonitor med Remote Web Server)")
+            else:
+                out.append(f"  GPU  {color(gpu_load)}{bar(gpu_load, width)}{RESET} "
+                           f"{gpu_load:5.1f} %  {fmt_temp(gpu_temp)}")
+            out += [
+                "",
+                f"  DISK {color(disk_pct)}{bar(disk_pct, width)}{RESET} {disk_pct:5.1f} %  "
+                f"({disk.used / gb:.0f} / {disk.total / gb:.0f} GB)",
+            ]
+            sys.stdout.write("\n".join(line + "\x1b[K" for line in out) + "\x1b[J")
             sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stdout.write("\x1b[?25h\n")  # vis markøren igen
-
-
+        sys.stdout.write("\x1b[?25h\n")
 if __name__ == "__main__":
     main()
-    eval
-    frozenset
-    sorted
