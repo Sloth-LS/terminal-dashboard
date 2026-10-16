@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import os
+import re
 import shutil
 import sys
 import time
@@ -162,9 +163,63 @@ def gpu_usage(query, counter):
     items = ctypes.cast(buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM))
     return min(sum(items[i].FmtValue.doubleValue for i in range(count.value)), 100.0)
 
+# --- Network ---
+
+def counter_sum(counter):
+    size = wintypes.DWORD(0)
+    count = wintypes.DWORD(0)
+    status = pdh.PdhGetFormattedCounterArrayW(counter, 0x200, ctypes.byref(size), ctypes.byref(count), None)
+    if status & 0xFFFFFFFF != 0x800007D2:
+        return 0.0
+    buf = ctypes.create_string_buffer(size.value)
+    pdh.PdhGetFormattedCounterArrayW(counter, 0x200, ctypes.byref(size), ctypes.byref(count), buf)
+    items = ctypes.cast(buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM))
+    return sum(items[i].FmtValue.doubleValue for i in range(count.value))
+
+def net_counters():
+    query = ctypes.c_void_p()
+    recv = ctypes.c_void_p()
+    sent = ctypes.c_void_p()
+    pdh.PdhOpenQueryW(None, None, ctypes.byref(query))
+    pdh.PdhAddEnglishCounterW(query, "\\Network Interface(*)\\Bytes Received/sec", None, ctypes.byref(recv))
+    pdh.PdhAddEnglishCounterW(query, "\\Network Interface(*)\\Bytes Sent/sec", None, ctypes.byref(sent))
+    pdh.PdhCollectQueryData(query)
+    return query, recv, sent
+
+def net_speed(query, recv, sent):
+    pdh.PdhCollectQueryData(query)
+    return counter_sum(recv), counter_sum(sent)
+
+def fmt_speed(b):
+    if b >= 1024 ** 2:
+        return f"{b / 1024 ** 2:6.2f} MB/s"
+    return f"{b / 1024:6.1f} KB/s"
+
 
 def fmt_temp(value):
     return "  n/a" if value is None else f"{value:5.1f} °C"
+
+def uptime_text():
+    kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+    seconds = kernel32.GetTickCount64() // 1000
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    return f"{days} d {hours} t {minutes} min"
+
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def box(title, lines, inner):
+    top = "┌─ " + title + " " + "─" * (inner - len(title) - 1) + "┐"
+    body = []
+    for line in lines:
+        pad = inner - len(ANSI.sub("", line))
+        body.append("│ " + line + " " * pad + " │")
+    bottom = "└" + "─" * (inner + 2) + "┘"
+    return [top] + body + [bottom]
 
 
 def parse_args():
@@ -182,9 +237,11 @@ def main():
     HIST_MAX = 500
     cpu_hist = [0.0] * HIST_MAX
     ram_hist = [0.0] * HIST_MAX
+    net_hist = [0.0] * HIST_MAX
     prev_idle, prev_total = cpu_times()
     adapters = gpu_adapters()
     query, counter = gpu_counter()
+    net_query, net_recv, net_sent = net_counters()
     try:
         while True:
             time.sleep(args.interval)
@@ -197,6 +254,9 @@ def main():
 
             cpu_hist = cpu_hist[1:] + [cpu]
             ram_hist = ram_hist[1:] + [ram]
+            down, up = net_speed(net_query, net_recv, net_sent)
+            net_hist = net_hist[1:] + [down]
+
 
             gpu_load = gpu_usage(query, counter)
             gpu_temp = gpu_temperature(adapters)
@@ -209,34 +269,40 @@ def main():
             hist_len = width
 
             gb = 1024 ** 3
-            out = [
-                "\x1b[H\x1b[1m  TERMINAL-DASHBOARD\x1b[0m   (Ctrl+C for at stoppe)",
-                "",
-                f"  CPU  {color(cpu)}{bar(cpu, width)}{RESET} {cpu:5.1f} %",
-                f"       {color(cpu)}{sparkline(cpu_hist[-hist_len:])}{RESET}",
-                "",
-                f"  RAM  {color(ram)}{bar(ram, width)}{RESET} {ram:5.1f} %  "
-                f"({used / gb:.1f} / {ram_total / gb:.1f} GB)",
-                f"       {color(ram)}{sparkline(ram_hist[-hist_len:])}{RESET}",
-                "",
-            ]
+            inner = width + 28
             if gpu_load is None:
-                out.append("  GPU  n/a")
+                gpu_line = "n/a"
             else:
-                out.append(f"  GPU  {color(gpu_load)}{bar(gpu_load, width)}{RESET} "
-                           f"{gpu_load:5.1f} %  {fmt_temp(gpu_temp)}")
-            out += [
-                "",
-                f"  DISK {color(disk_pct)}{bar(disk_pct, width)}{RESET} {disk_pct:5.1f} %  "
-                f"({disk.used / gb:.0f} / {disk.total / gb:.0f} GB)",
-            ]
+                gpu_line = f"{color(gpu_load)}{bar(gpu_load, width)}{RESET} {gpu_load:5.1f} %  {fmt_temp(gpu_temp)}"
+
+            out = [f"\x1b[H\x1b[1m  TERMINAL-DASHBOARD\x1b[0m   {time.strftime('%H:%M:%S')}   (Ctrl+C to stop)", ""]
+            out += box("CPU", [
+                f"{color(cpu)}{bar(cpu, width)}{RESET} {cpu:5.1f} %",
+                f"{color(cpu)}{sparkline(cpu_hist[-hist_len:])}{RESET}",
+            ], inner)
+            out += box("RAM", [
+                f"{color(ram)}{bar(ram, width)}{RESET} {ram:5.1f} %  ({used / gb:.1f} / {ram_total / gb:.1f} GB)",
+                f"{color(ram)}{sparkline(ram_hist[-hist_len:])}{RESET}",
+            ], inner)
+            out += box("GPU", [gpu_line], inner)
+            out += box("DISK", [
+                f"{color(disk_pct)}{bar(disk_pct, width)}{RESET} {disk_pct:5.1f} %  ({disk.used / gb:.0f} / {disk.total / gb:.0f} GB)",
+            ], inner)
+            peak = max(max(net_hist[-hist_len:]), 1)
+            net_graph = sparkline([v / peak * 100 for v in net_hist[-hist_len:]])
+            out += box("NET", [
+                f"↓ {fmt_speed(down)}   ↑ {fmt_speed(up)}",
+                f"\x1b[36m{net_graph}{RESET}",
+            ], inner)
+            out += box("UPTIME", [uptime_text()], inner)
+            
+            
             sys.stdout.write("\n".join(line + "\x1b[K" for line in out) + "\x1b[J")
             sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
         sys.stdout.write("\x1b[?25h\n")
-
 
 if __name__ == "__main__":
     main()
