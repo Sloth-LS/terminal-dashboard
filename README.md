@@ -3,17 +3,29 @@
 A live system monitor for the Windows terminal, written in Python with **no external libraries and no extra software** — only the standard library and what Windows already provides.
 
 ```
-  TERMINAL-DASHBOARD   (Ctrl+C for at stoppe)
+  TERMINAL-DASHBOARD   01:49:17   (Ctrl+C to stop)
 
-  CPU  ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  10.3 %
-       ▁▁▂▁▁▃▅▂▁▁▁▂▁▁▁▁▂▃▂▁▁▁▂▁▁▁▁▂▃▂▁▁▂
-
-  RAM  ███████████████████████████████████░░░░░  86.1 %  (13.6 / 15.8 GB)
-       ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
-
-  GPU  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.2 %   43.0 °C
-
-  DISK ██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   26.1 %  (243 / 930 GB)
+┌─ CPU ──────────────────────────────────────────────────────────────┐
+│ ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  11.0 %                     │
+│ ▁▁▂▁▁▃▅▂▁▁▁▂▁▁▁▁▂▃▂▁▁▁▂▁▁▁▁▂▃▂▁▁▂▁▁▃▅▂                             │
+└────────────────────────────────────────────────────────────────────┘
+┌─ RAM ──────────────────────────────────────────────────────────────┐
+│ ████████████████████████████████░░░░░░  84.9 %  (13.4 / 15.8 GB)   │
+│ ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇                             │
+└────────────────────────────────────────────────────────────────────┘
+┌─ GPU ──────────────────────────────────────────────────────────────┐
+│ █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1.8 %   44.0 °C           │
+└────────────────────────────────────────────────────────────────────┘
+┌─ DISK ─────────────────────────────────────────────────────────────┐
+│ ███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  27.7 %  (258 / 930 GB)     │
+└────────────────────────────────────────────────────────────────────┘
+┌─ NET ──────────────────────────────────────────────────────────────┐
+│ ↓    0.7 KB/s   ↑    0.5 KB/s                                      │
+│ ▁▁▁▁▂▁▁▁▁▁▁▁▃▇█▅▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▁▂                             │
+└────────────────────────────────────────────────────────────────────┘
+┌─ UPTIME ───────────────────────────────────────────────────────────┐
+│ 0 d 6 t 26 min                                                     │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -22,8 +34,12 @@ A live system monitor for the Windows terminal, written in Python with **no exte
 - **RAM** usage with a history graph
 - **GPU** load and temperature (the same numbers Task Manager shows)
 - **Disk** usage for any drive
+- **Network** download and upload speed with a history graph
+- **Uptime** — how long the PC has been on
+- A clock in the title
+- Each panel drawn in its own box
 - Colored bars: green below 50 %, yellow below 80 %, red above
-- Bars and graphs resize to fit the terminal window
+- Bars, graphs and boxes resize to fit the terminal window
 - Redraws in place without flicker, and restores the cursor on exit
 
 ## Requirements
@@ -65,9 +81,17 @@ Everything is read straight from Windows through `ctypes`:
 | RAM | `GlobalMemoryStatusEx` in `kernel32.dll` |
 | GPU load | Windows performance counters (`GPU Engine … Utilization Percentage`) through `pdh.dll` |
 | GPU temperature | The graphics driver's performance data through `D3DKMTQueryAdapterInfo` in `gdi32.dll` |
+| Network | Windows performance counters (`Network Interface … Bytes Received/sec` and `Bytes Sent/sec`) through `pdh.dll`, summed over all network adapters |
+| Uptime | `GetTickCount64` in `kernel32.dll` |
 | Disk | `shutil.disk_usage` from the standard library |
 
-The screen is drawn with ANSI escape codes for colors and cursor movement, and the block characters `▁▂▃▄▅▆▇█` for the graphs.
+The screen is drawn with ANSI escape codes for colors and cursor movement, box-drawing characters (`┌ ─ ┐ │ └ ┘`) for the panels, and the block characters `▁▂▃▄▅▆▇█` for the graphs.
+
+### Reading the network panel
+
+The network panel shows how much the connection is being **used right now**, not how fast it can go. When nothing is downloading it shows a few KB/s of background traffic. Speeds are in bytes (KB/s and MB/s, like Steam and Windows use); internet plans are sold in bits, so a 100 Mbit/s connection tops out around 12 MB/s.
+
+The network graph scales to the highest speed in its history, since network traffic has no fixed 100 % maximum.
 
 ### Why no CPU temperature?
 
@@ -75,6 +99,7 @@ The CPU temperature lives in a special register inside the processor that can on
 
 ## Roadmap
 
+- [ ] Disk usage for every drive
+- [ ] Top 5 programs by RAM usage
 - [ ] One bar per CPU core
-- [ ] Network traffic
-- [ ] Boxes around each panel
+- [ ] Save settings in a `settings.json` file
