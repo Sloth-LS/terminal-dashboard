@@ -163,6 +163,7 @@ def gpu_usage(query, counter):
     items = ctypes.cast(buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM))
     return min(sum(items[i].FmtValue.doubleValue for i in range(count.value)), 100.0)
 
+
 # --- Network ---
 
 def counter_sum(counter):
@@ -176,6 +177,7 @@ def counter_sum(counter):
     items = ctypes.cast(buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM))
     return sum(items[i].FmtValue.doubleValue for i in range(count.value))
 
+
 def net_counters():
     query = ctypes.c_void_p()
     recv = ctypes.c_void_p()
@@ -186,9 +188,11 @@ def net_counters():
     pdh.PdhCollectQueryData(query)
     return query, recv, sent
 
+
 def net_speed(query, recv, sent):
     pdh.PdhCollectQueryData(query)
     return counter_sum(recv), counter_sum(sent)
+
 
 def fmt_speed(b):
     if b >= 1024 ** 2:
@@ -199,33 +203,104 @@ def fmt_speed(b):
 def fmt_temp(value):
     return "  n/a" if value is None else f"{value:5.1f} °C"
 
+
 def uptime_text():
     kernel32.GetTickCount64.restype = ctypes.c_ulonglong
     seconds = kernel32.GetTickCount64() // 1000
     days, rest = divmod(seconds, 86400)
     hours, rest = divmod(rest, 3600)
     minutes = rest // 60
-    return f"{days} d {hours} t {minutes} min"
+    return f"{days} d {hours} h {minutes} min"
 
+
+def fixed_drives():
+    mask = kernel32.GetLogicalDrives()
+    drives = []
+    for i in range(26):
+        if mask & (1 << i):
+            root = f"{chr(65 + i)}:\\"
+            if kernel32.GetDriveTypeW(root) == 3:  # 3 = fixed disk
+                drives.append(root)
+    return drives
 
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+CYAN = "\x1b[36m"
+DIM = "\x1b[2m"
+BOLD = "\x1b[1m"
+
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+          "August", "September", "October", "November", "December"]
+
+# Big digits for the clock: each character is 5 rows high and 3 wide
+FONT = {
+    "0": ["███", "█ █", "█ █", "█ █", "███"],
+    "1": [" █ ", "██ ", " █ ", " █ ", "███"],
+    "2": ["███", "  █", "███", "█  ", "███"],
+    "3": ["███", "  █", "███", "  █", "███"],
+    "4": ["█ █", "█ █", "███", "  █", "  █"],
+    "5": ["███", "█  ", "███", "  █", "███"],
+    "6": ["███", "█  ", "███", "█ █", "███"],
+    "7": ["███", "  █", "  █", "  █", "  █"],
+    "8": ["███", "█ █", "███", "█ █", "███"],
+    "9": ["███", "█ █", "███", "  █", "███"],
+    ":": ["   ", " ▀ ", "   ", " ▄ ", "   "],
+}
 
 
-def box(title, lines, inner):
-    top = "┌─ " + title + " " + "─" * (inner - len(title) - 1) + "┐"
-    body = []
-    for line in lines:
-        pad = inner - len(ANSI.sub("", line))
-        body.append("│ " + line + " " * pad + " │")
-    bottom = "└" + "─" * (inner + 2) + "┘"
+def visible_len(text):
+    return len(ANSI.sub("", text))
+
+
+def pad(text, width):
+    return text + " " * (width - visible_len(text))
+
+
+def big_clock(text):
+    return [" ".join(FONT[ch][row] for ch in text) for row in range(5)]
+
+
+def tall_graph(values, height):
+    rows = []
+    for row in range(height):
+        level_floor = (height - 1 - row) * 8
+        line = ""
+        for v in values:
+            level = round(v / 100 * height * 8) - level_floor
+            line += BLOCKS[max(0, min(8, level))]
+        rows.append(line)
+    return rows
+
+
+def panel(title, lines, width, right="", footer="", rounded=False):
+    tl, tr, bl, br = ("╭", "╮", "╰", "╯") if rounded else ("┌", "┐", "└", "┘")
+    left = f"{tl}─ {title} "
+    right_part = f" {right} ─{tr}" if right else f"─{tr}"
+    top = left + "─" * (width - visible_len(left) - visible_len(right_part)) + right_part
+    if footer:
+        bottom_left = f"{bl}── {footer} "
+        bottom = bottom_left + "─" * (width - visible_len(bottom_left) - 1) + br
+    else:
+        bottom = bl + "─" * (width - 2) + br
+    body = ["│ " + pad(line, width - 4) + " │" for line in lines]
     return [top] + body + [bottom]
+
+
+def side_by_side(*blocks):
+    height = max(len(b) for b in blocks)
+    widths = [visible_len(b[0]) for b in blocks]
+    rows = []
+    for i in range(height):
+        parts = [b[i] if i < len(b) else " " * w for b, w in zip(blocks, widths)]
+        rows.append(" ".join(parts))
+    return rows
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Terminal-dashboard til CPU, RAM, GPU og disk")
     p.add_argument("-i", "--interval", type=float, default=1.0, help="sekunder mellem opdateringer")
-    p.add_argument("--disk", default="C:\\", help="drev der vises i disk-panelet")
+    p.add_argument("--disk", default=None, help="kun vis dette drev (standard: alle drev)")
     return p.parse_args()
 
 
@@ -242,6 +317,7 @@ def main():
     adapters = gpu_adapters()
     query, counter = gpu_counter()
     net_query, net_recv, net_sent = net_counters()
+    drives = [args.disk] if args.disk else fixed_drives()
     try:
         while True:
             time.sleep(args.interval)
@@ -257,52 +333,65 @@ def main():
             down, up = net_speed(net_query, net_recv, net_sent)
             net_hist = net_hist[1:] + [down]
 
-
-            gpu_load = gpu_usage(query, counter)
+            gpu_load = gpu_usage(query, counter) or 0.0
             gpu_temp = gpu_temperature(adapters)
 
-            disk = shutil.disk_usage(args.disk)
-            disk_pct = disk.used / disk.total * 100
-
-            cols = shutil.get_terminal_size().columns
-            width = max(10, min(cols - 40, 100))
-            hist_len = width
-
             gb = 1024 ** 3
-            inner = width + 28
-            if gpu_load is None:
-                gpu_line = "n/a"
-            else:
-                gpu_line = f"{color(gpu_load)}{bar(gpu_load, width)}{RESET} {gpu_load:5.1f} %  {fmt_temp(gpu_temp)}"
+            cols = shutil.get_terminal_size().columns
+            total_w = max(60, min(cols - 1, 120))
 
-            out = [f"\x1b[H\x1b[1m  TERMINAL-DASHBOARD\x1b[0m   {time.strftime('%H:%M:%S')}   (Ctrl+C to stop)", ""]
-            out += box("CPU", [
-                f"{color(cpu)}{bar(cpu, width)}{RESET} {cpu:5.1f} %",
-                f"{color(cpu)}{sparkline(cpu_hist[-hist_len:])}{RESET}",
-            ], inner)
-            out += box("RAM", [
-                f"{color(ram)}{bar(ram, width)}{RESET} {ram:5.1f} %  ({used / gb:.1f} / {ram_total / gb:.1f} GB)",
-                f"{color(ram)}{sparkline(ram_hist[-hist_len:])}{RESET}",
-            ], inner)
-            out += box("GPU", [gpu_line], inner)
-            out += box("DISK", [
-                f"{color(disk_pct)}{bar(disk_pct, width)}{RESET} {disk_pct:5.1f} %  ({disk.used / gb:.0f} / {disk.total / gb:.0f} GB)",
-            ], inner)
-            peak = max(max(net_hist[-hist_len:]), 1)
-            net_graph = sparkline([v / peak * 100 for v in net_hist[-hist_len:]])
-            out += box("NET", [
-                f"↓ {fmt_speed(down)}   ↑ {fmt_speed(up)}",
-                f"\x1b[36m{net_graph}{RESET}",
-            ], inner)
-            out += box("UPTIME", [uptime_text()], inner)
-            
-            
+            # --- Top: big clock + tall CPU graph ---
+            now = time.localtime()
+            clock = big_clock(time.strftime("%H:%M:%S", now))
+            date = f"{DAYS[now.tm_wday]}, {MONTHS[now.tm_mon - 1]} {now.tm_mday}"
+            left_col = [BOLD + row + RESET for row in clock] + [DIM + date + RESET]
+
+            graph_w = total_w - 4 - 31 - 3
+            cpu_graph = tall_graph(cpu_hist[-graph_w:], 3)
+            header = f"CPU {'─' * (graph_w - 12)} {color(cpu)}{cpu:5.1f} %{RESET}"
+            right_col = [header] + [color(cpu) + row + RESET for row in cpu_graph] + [DIM + "─" * graph_w + RESET, ""]
+
+            top_lines = [pad(left, 31) + "   " + right for left, right in zip(left_col, right_col)]
+            out = ["\x1b[H"]
+            out += panel("TERMINAL-DASHBOARD", top_lines, total_w, right="Ctrl+C to stop", rounded=True)
+
+            # --- Middle: RAM, GPU, NET ---
+            w3 = (total_w - 2) // 3
+            w_last = total_w - 2 - 2 * w3
+            ram_box = panel("RAM", [color(ram) + bar(ram, w3 - 4) + RESET], w3,
+                            right=f"{ram:.0f} %", footer=f"{used / gb:.1f} / {ram_total / gb:.1f} GB")
+            gpu_temp_text = "" if gpu_temp is None else f" {gpu_temp:.0f}°C"
+            gpu_box = panel("GPU", [color(gpu_load) + bar(gpu_load, w3 - 4) + RESET], w3,
+                            right=f"{gpu_load:.0f} %{gpu_temp_text}")
+            peak = max(max(net_hist[-(w_last - 4):]), 1)
+            net_graph = sparkline([v / peak * 100 for v in net_hist[-(w_last - 4):]])
+            net_box = panel("NET", [CYAN + net_graph + RESET], w_last,
+                            right=f"↓ {fmt_speed(down).strip()}", footer=f"↑ {fmt_speed(up).strip()}")
+            out += side_by_side(ram_box, gpu_box, net_box)
+
+            # --- Bottom: DISK + SYSTEM ---
+            sys_w = 30
+            disk_w = total_w - sys_w - 1
+            disk_bar_w = disk_w - 4 - 3 - 7 - 18
+            disk_lines = []
+            for d in drives:
+                usage = shutil.disk_usage(d)
+                pct = usage.used / usage.total * 100
+                size = f"{usage.used / gb:.0f} / {usage.total / gb:.0f} GB"
+                disk_lines.append(f"{d[:2]} {color(pct)}{bar(pct, disk_bar_w)}{RESET} {pct:4.0f} %  {size:>16}")
+            sys_lines = [f"up {uptime_text()}", f"{len(drives)} drives found"]
+            height = max(len(disk_lines), len(sys_lines))
+            disk_lines += [""] * (height - len(disk_lines))
+            sys_lines += [""] * (height - len(sys_lines))
+            out += side_by_side(panel("DISK", disk_lines, disk_w), panel("SYSTEM", sys_lines, sys_w))
+
             sys.stdout.write("\n".join(line + "\x1b[K" for line in out) + "\x1b[J")
             sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
         sys.stdout.write("\x1b[?25h\n")
+
 
 if __name__ == "__main__":
     main()
